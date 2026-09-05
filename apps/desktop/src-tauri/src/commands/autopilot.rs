@@ -667,10 +667,13 @@ pub async fn autopilot_run(app: AppHandle, autopilot_id: String) -> Value {
     // just-persisted record (record_run consumed `found_jobs`, and the merge
     // it performs is what decides the FINAL per-job board/description this
     // run actually kept) and hand any LinkedIn rows still blank to a
-    // best-effort background pass. Spawned AFTER `record_run` and the "new
-    // jobs" notification below so a slow/failing LinkedIn fetch can never
-    // delay either — see `linkedin_enrich`'s own doc for the failure-isolation
-    // and rate-limiting details.
+    // best-effort background pass. Spawned via `tauri::async_runtime::spawn`
+    // (fire-and-forget, never awaited here) right after `record_run` — a
+    // slow/failing LinkedIn fetch can never delay this command's own return
+    // or the "new jobs" notification below, regardless of which one the
+    // detached task happens to still be running alongside — see
+    // `linkedin_enrich`'s own doc for the failure-isolation and rate-limiting
+    // details.
     if let Some(ap) = store(&app).lock().get(&autopilot_id) {
         let targets = crate::autopilot_helpers::linkedin_enrich::select_linkedin_enrichment_targets(
             &ap.found_jobs,

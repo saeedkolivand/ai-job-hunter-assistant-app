@@ -2143,6 +2143,30 @@ fn merge_preserves_and_refreshes_board_across_resurface() {
 }
 
 #[test]
+fn merge_preserves_a_real_description_over_a_blank_resurface() {
+    // LinkedIn search results always carry `description: Some("")` (never
+    // `None`) — that is its "unknown" sentinel, not `None`. A posting
+    // enriched by `autopilot_helpers::linkedin_enrich` on a prior run must
+    // NOT lose that real description just because it resurfaces in a fresh
+    // LinkedIn scrape, which reports the same blank sentinel every time the
+    // posting is still listed.
+    let mut existing = found_job("https://a.com/1", 100);
+    existing.description = Some("A real, fetched job description.".to_string());
+
+    let mut resurfaced = found_job("https://a.com/1", 999);
+    resurfaced.description = Some(String::new()); // LinkedIn's blank sentinel
+
+    let merged = merge_found_jobs(&[existing], vec![resurfaced]);
+
+    let a1 = merged.iter().find(|j| j.url == "https://a.com/1").unwrap();
+    assert_eq!(
+        a1.description,
+        Some("A real, fetched job description.".to_string()),
+        "a blank resurface must never clobber an already-known real description"
+    );
+}
+
+#[test]
 fn merge_preserves_and_refreshes_trust_across_resurface() {
     // Same legacy-migration case as the board test above: an existing row
     // persisted before `trust` existed (None) must pick up the incoming trust

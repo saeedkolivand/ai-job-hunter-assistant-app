@@ -109,3 +109,55 @@ fn empty_urls_short_circuits_without_touching_the_rate_limiter() {
     let jobs: Vec<FoundJob> = Vec::new();
     assert!(select_linkedin_enrichment_targets(&jobs).is_empty());
 }
+
+fn posting(description: Option<&str>) -> JobPosting {
+    JobPosting {
+        id: "linkedin:1".to_string(),
+        external_id: Some("1".to_string()),
+        title: "Engineer".to_string(),
+        company: "Acme".to_string(),
+        location: None,
+        url: "https://www.linkedin.com/jobs/view/1".to_string(),
+        source: "linkedin".to_string(),
+        description: description.map(str::to_string),
+        requirements: None,
+        posted_at: None,
+        captured_at: 0,
+        extra: std::collections::HashMap::new(),
+    }
+}
+
+#[test]
+fn classify_resolution_extracts_a_real_description() {
+    let outcome = classify_resolution(Ok(Some(posting(Some("A real job description.")))));
+    assert_eq!(
+        outcome,
+        EnrichOutcome::Description("A real job description.".to_string())
+    );
+}
+
+#[test]
+fn classify_resolution_skips_a_blank_description() {
+    // LinkedIn's own sentinel (`Some("")`) — a resolve that still didn't find
+    // real text must not be treated as a usable update.
+    assert_eq!(
+        classify_resolution(Ok(Some(posting(Some(""))))),
+        EnrichOutcome::Skip
+    );
+    assert_eq!(
+        classify_resolution(Ok(Some(posting(None)))),
+        EnrichOutcome::Skip
+    );
+}
+
+#[test]
+fn classify_resolution_skips_ok_none_the_same_as_an_error() {
+    // Documented as one case, not two (see `EnrichOutcome::Skip`'s doc): a
+    // genuinely-removed posting and a transient failure both retry on the
+    // next run via `select_linkedin_enrichment_targets` alone.
+    assert_eq!(classify_resolution(Ok(None)), EnrichOutcome::Skip);
+    assert_eq!(
+        classify_resolution(Err(anyhow::anyhow!("network error"))),
+        EnrichOutcome::Skip
+    );
+}

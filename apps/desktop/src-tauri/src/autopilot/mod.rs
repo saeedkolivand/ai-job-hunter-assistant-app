@@ -1192,7 +1192,15 @@ fn merge_found_jobs(existing: &[FoundJob], incoming: Vec<FoundJob>) -> Vec<Found
                 if inc.board.is_some() {
                     row.board = inc.board.clone();
                 }
-                if inc.description.is_some() {
+                // NOT `inc.description.is_some()` like the other fields above: a
+                // LinkedIn search result always carries `Some("")` (never `None`)
+                // for its description — that is its "unknown" sentinel, not
+                // `None`. An `is_some()` guard would let that blank resurface
+                // every run and clobber a real description the enrichment pass
+                // (`autopilot_helpers::linkedin_enrich`) had already fetched and
+                // written back — see
+                // `merge_preserves_a_real_description_over_a_blank_resurface`.
+                if !crate::documents::keywords::description_is_blank(inc.description.as_deref()) {
                     row.description = inc.description.clone();
                 }
                 // Same fill-without-clobbering pattern as `board`/`description`: an
