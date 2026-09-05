@@ -300,7 +300,12 @@ impl LinkedInJobsApiClient {
                 title: title.clone(),
                 company: company.clone(),
                 location: Some(location.clone()),
-                description: Some(String::new()), // Will be filled in background
+                // Blank at search time — an autopilot run backfills this after
+                // `record_run`, best-effort, via
+                // `autopilot_helpers::linkedin_enrich` (issue #1114). A manual
+                // scrape/import instead resolves it inline through
+                // `scraping::scrape_url::resolve`.
+                description: Some(String::new()),
                 captured_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
