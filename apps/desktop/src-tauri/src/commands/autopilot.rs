@@ -681,11 +681,7 @@ pub async fn autopilot_run(app: AppHandle, autopilot_id: String) -> Value {
         if !targets.is_empty() {
             let app_for_enrich = app.clone();
             tauri::async_runtime::spawn(async move {
-                crate::autopilot_helpers::linkedin_enrich::enrich_linkedin_descriptions(
-                    app_for_enrich,
-                    targets,
-                )
-                .await;
+                linkedin_enrich::enrich_linkedin_descriptions(app_for_enrich, targets).await;
             });
         }
     }
@@ -966,6 +962,14 @@ use rerank::*;
 // recomputed here rather than persisted.
 mod best_matches;
 use best_matches::*;
+
+// ── LinkedIn-only post-discovery description enrichment (issue #1114) ──────
+//
+// L3 (Tauri/`AppHandle`-touching orchestration) — the pure "which URLs need a
+// fetch" / "what does a fetch outcome mean" decisions live in the L2
+// `autopilot_helpers::linkedin_enrich` instead (see its doc + this module's
+// own doc for the boundary and why: `docs/architecture-rules.md` R2/R7).
+mod linkedin_enrich;
 
 /// Whether a posting passes the autopilot's keyword filters: it must contain
 /// **all** must-include keywords and **none** of the exclude keywords, matched

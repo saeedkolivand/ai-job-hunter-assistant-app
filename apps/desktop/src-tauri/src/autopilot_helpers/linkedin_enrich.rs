@@ -1,14 +1,16 @@
-//! Post-discovery description enrichment for LinkedIn-only found jobs (issue
-//! #1114, LinkedIn slice). LinkedIn search results never carry a description —
-//! `LinkedInApiClient` always builds a posting with `description:
-//! Some(String::new())` (no board-side detail call) — so a LinkedIn
-//! [`FoundJob`] reaches `record_run` title-only, forever, unless something
-//! resolves it after the fact. This module is that something: a background,
-//! best-effort pass reusing the SAME single-URL resolver
-//! (`scraping::scrape_url::resolve`) the manual "re-check this job" command and
-//! the extension's import flow already use — no new scraping logic.
-
-use tauri::AppHandle;
+//! Pure decision logic for post-discovery LinkedIn description enrichment
+//! (issue #1114, LinkedIn slice). LinkedIn search results never carry a
+//! description — `LinkedInApiClient` always builds a posting with
+//! `description: Some(String::new())` (no board-side detail call) — so a
+//! LinkedIn [`FoundJob`] reaches `record_run` title-only, forever, unless
+//! something resolves it after the fact.
+//!
+//! This is L2 (`autopilot_helpers`): it owns only the pure "which URLs need a
+//! fetch" / "what does a fetch outcome mean" decisions, so they stay testable
+//! without a live `AppHandle`. The actual fetch/rate-limit/write-back
+//! orchestration is Tauri-shaped (an `AppHandle`, a `#[tauri::command]` call)
+//! and therefore lives one layer up, in `commands::autopilot::linkedin_enrich`
+//! (L3) — see `docs/architecture-rules.md` R2/R7.
 
 use crate::autopilot::FoundJob;
 use crate::documents::keywords::description_is_blank;
@@ -50,10 +52,11 @@ pub(crate) fn select_linkedin_enrichment_targets(found_jobs: &[FoundJob]) -> Vec
 }
 
 /// A single URL's resolution outcome, classified into what the caller needs
-/// to decide. Pulled out of the async fetch loop below so this decision is
-/// unit-testable without a live `AppHandle`/network.
+/// to decide. `pub(crate)` so `commands::autopilot::linkedin_enrich` (L3, the
+/// only allowed caller of the actual fetch) can match on it; this L2 module
+/// itself never touches an `AppHandle` or the network.
 #[derive(Debug, PartialEq)]
-enum EnrichOutcome {
+pub(crate) enum EnrichOutcome {
     /// A genuinely usable (non-blank) description to write back.
     Description(String),
     /// Nothing usable this attempt — a network/HTTP error, a fetch that came
@@ -70,97 +73,18 @@ enum EnrichOutcome {
     Skip,
 }
 
-/// Pure decision over one [`crate::scraping::scrape_url::resolve`] outcome —
-/// see [`EnrichOutcome`] for what each case means and why `Ok(None)` and
-/// `Err` are not (yet) distinguished.
-fn classify_resolution(result: anyhow::Result<Option<JobPosting>>) -> EnrichOutcome {
+/// Pure decision over one `scraping::scrape_url::resolve` outcome — see
+/// [`EnrichOutcome`] for what each case means and why `Ok(None)` and `Err`
+/// are not (yet) distinguished. Takes the plain `anyhow::Result` shape
+/// (rather than the L1 fn itself) so this stays callable with a fabricated
+/// value in a unit test, no network/AppHandle required.
+pub(crate) fn classify_resolution(result: anyhow::Result<Option<JobPosting>>) -> EnrichOutcome {
     match result {
         Ok(Some(p)) => match p.description.filter(|d| !description_is_blank(Some(d))) {
             Some(d) => EnrichOutcome::Description(d),
             None => EnrichOutcome::Skip,
         },
         Ok(None) | Err(_) => EnrichOutcome::Skip,
-    }
-}
-
-/// Best-effort background pass: resolve each `url` via the shared single-URL
-/// resolver, paced through LinkedIn's own process-wide rate limiter, and write
-/// back any real description through the SAME mechanism
-/// `scrape_update_description` uses for a manual correction (issue #1109's
-/// write-back fix) — so the match scorer and every found-jobs surface pick up
-/// the fetched text identically to a user-triggered fix.
-///
-/// Fire-and-forget: spawned via `tauri::async_runtime::spawn` from
-/// `autopilot_run`, right after that run's own `record_run` call (before the
-/// "new jobs" notification, though the ordering is moot either way — `spawn`
-/// never blocks its caller), so a slow or failing LinkedIn fetch can never
-/// delay the run's own "done" state or that notification. A per-URL failure
-/// (network error, non-2xx, expired auth, selector drift returning no usable
-/// text) is logged and skipped, never propagated — this is a best-effort
-/// improvement layered on a scrape that already succeeded, and must never be
-/// mistaken for a reason to retry aggressively (LinkedIn-hostile traffic
-/// pattern) or to fail the run.
-pub(crate) async fn enrich_linkedin_descriptions(app: AppHandle, urls: Vec<String>) {
-    if urls.is_empty() {
-        return;
-    }
-    let limiter = crate::scraping::linkedin::rate_limiter::linkedin_rate_limiter();
-    let mut enriched = 0usize;
-    for url in &urls {
-        limiter.wait_for_slot().await;
-        let result = crate::scraping::scrape_url::resolve(url).await;
-        // Count the attempt against the shared budget regardless of outcome —
-        // the request already reached LinkedIn's servers (or was denied one),
-        // so a string of failures must still be paced, not retried in a burst.
-        limiter.record_request().await;
-
-        if let Err(ref e) = result {
-            log::info!(
-                "[autopilot] LinkedIn description enrichment failed for one posting: {}",
-                crate::observability::sanitize_reason(&e.to_string())
-            );
-        }
-        let EnrichOutcome::Description(description) = classify_resolution(result) else {
-            continue;
-        };
-
-        // `scrape_update_description` does synchronous file I/O (both stores
-        // it patches persist to disk) — never call it inline on this async
-        // task; `spawn_blocking` matches every other sync/blocking call this
-        // crate makes from async code (e.g. `autopilot_best_matches`).
-        let app_for_write = app.clone();
-        let url_for_write = url.clone();
-        let joined = tauri::async_runtime::spawn_blocking(move || {
-            crate::commands::scrape::scrape_update_description(
-                app_for_write,
-                crate::commands::scrape::ScrapeUpdateDescriptionRequest {
-                    url: url_for_write,
-                    description,
-                },
-            )
-        })
-        .await;
-        match joined {
-            Ok(Ok(true)) => enriched += 1,
-            Ok(Ok(false)) => {
-                // The row moved/was dismissed between discovery and this fetch —
-                // not an error, just nothing left to enrich.
-            }
-            Ok(Err(e)) => log::info!(
-                "[autopilot] LinkedIn description write-back failed for one posting: {}",
-                crate::observability::sanitize_reason(&e.to_string())
-            ),
-            Err(e) => log::info!(
-                "[autopilot] LinkedIn description write-back task failed for one posting: {}",
-                crate::observability::sanitize_reason(&e.to_string())
-            ),
-        }
-    }
-    if enriched > 0 {
-        log::info!(
-            "[autopilot] LinkedIn description enrichment: {enriched}/{} postings updated",
-            urls.len()
-        );
     }
 }
 

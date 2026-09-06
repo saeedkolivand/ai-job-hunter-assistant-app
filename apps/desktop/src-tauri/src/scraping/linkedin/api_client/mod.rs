@@ -302,7 +302,7 @@ impl LinkedInJobsApiClient {
                 location: Some(location.clone()),
                 // Blank at search time — an autopilot run backfills this after
                 // `record_run`, best-effort, via
-                // `autopilot_helpers::linkedin_enrich` (issue #1114). A manual
+                // `commands::autopilot::linkedin_enrich` (issue #1114). A manual
                 // scrape/import instead resolves it inline through
                 // `scraping::scrape_url::resolve`.
                 description: Some(String::new()),
