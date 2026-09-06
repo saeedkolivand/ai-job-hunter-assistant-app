@@ -1,5 +1,19 @@
 [
   {
+    "number": 1116,
+    "title": "feat: give the extension side panel connection-status awareness",
+    "html_url": "https://github.com/saeedkolivand/ai-job-hunter-app/pull/1116",
+    "draft": false,
+    "created_at": "2026-09-05T18:01:56Z",
+    "updated_at": "2026-09-05T18:23:35Z",
+    "merged_at": "2026-09-05T18:20:21Z",
+    "closed_at": "2026-09-05T18:20:21Z",
+    "requested_reviewers": [],
+    "user": {
+      "login": "saeedkolivand"
+    }
+  },
+  {
     "number": 1111,
     "title": "ui: rename the open-panel control to \"Open AI Job Hunter answer tool\"",
     "html_url": "https://github.com/saeedkolivand/ai-job-hunter-app/pull/1111",
@@ -680,20 +694,6 @@
     "updated_at": "2026-08-20T16:22:15Z",
     "merged_at": "2026-08-20T16:07:38Z",
     "closed_at": "2026-08-20T16:07:38Z",
-    "requested_reviewers": [],
-    "user": {
-      "login": "saeedkolivand"
-    }
-  },
-  {
-    "number": 1059,
-    "title": "fix(documents): score the saved résumé the score tab promises",
-    "html_url": "https://github.com/saeedkolivand/ai-job-hunter-app/pull/1059",
-    "draft": false,
-    "created_at": "2026-08-20T16:04:57Z",
-    "updated_at": "2026-08-20T16:26:37Z",
-    "merged_at": "2026-08-20T16:13:00Z",
-    "closed_at": "2026-08-20T16:13:00Z",
     "requested_reviewers": [],
     "user": {
       "login": "saeedkolivand"

@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "number": 1117,
+    "title": "feat: LinkedIn description enrichment + paginated found-jobs MCP resource",
+    "html_url": "https://github.com/saeedkolivand/ai-job-hunter-app/pull/1117",
+    "draft": false,
+    "created_at": "2026-09-06T01:44:20Z",
+    "updated_at": "2026-09-06T02:48:40Z",
+    "merged_at": null,
+    "closed_at": null,
+    "requested_reviewers": [],
+    "user": {
+      "login": "saeedkolivand"
+    }
+  }
+]

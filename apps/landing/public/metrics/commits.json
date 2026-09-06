@@ -1,5 +1,29 @@
 [
   {
+    "sha": "1bfe9353cc934e0151be2ed48fd8201bfc001b64",
+    "commit": {
+      "message": "feat: give the extension side panel connection-status awareness (#1116)",
+      "author": {
+        "date": "2026-09-05T18:20:21Z"
+      }
+    },
+    "author": {
+      "login": "saeedkolivand"
+    }
+  },
+  {
+    "sha": "2d7ef6dd69a8d368dc336586ce70cdc7b309badb",
+    "commit": {
+      "message": "chore: update mission-control snapshot data [skip ci]",
+      "author": {
+        "date": "2026-09-05T07:38:49Z"
+      }
+    },
+    "author": {
+      "login": "github-actions[bot]"
+    }
+  },
+  {
     "sha": "7c158df5e0fb0da8fd39d6e34dac6adb7d065c8c",
     "commit": {
       "message": "chore: sync landing download version to v0.148.0",
@@ -1173,30 +1197,6 @@
     },
     "author": {
       "login": "github-actions[bot]"
-    }
-  },
-  {
-    "sha": "8124bd6516b5ce2aecca0de5a46638ad514931e8",
-    "commit": {
-      "message": "chore: sync homebrew cask to v0.142.0 [skip ci]",
-      "author": {
-        "date": "2026-08-22T06:39:26Z"
-      }
-    },
-    "author": {
-      "login": "github-actions[bot]"
-    }
-  },
-  {
-    "sha": "b1eb5584bcd8b61dd7a9b1eca42c5264d5d6e1bf",
-    "commit": {
-      "message": "chore: update export benchmark data [skip ci]",
-      "author": {
-        "date": "2026-08-22T06:28:24Z"
-      }
-    },
-    "author": {
-      "login": "github"
     }
   }
 ]
