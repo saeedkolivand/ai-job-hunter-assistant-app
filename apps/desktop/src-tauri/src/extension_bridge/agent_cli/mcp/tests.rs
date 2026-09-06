@@ -1097,6 +1097,7 @@ fn server_new_false_true_still_resolves_the_full_irreversible_tier() {
             "call-read",
             "call-reversible",
             "commands",
+            "found-jobs",
             "job",
             "profile",
         ]
@@ -1115,6 +1116,7 @@ fn tool_names_by_launch_mode_match_hand_written_literal_lists() {
             "best-matches",
             "call-read",
             "commands",
+            "found-jobs",
             "job",
             "profile"
         ],
@@ -1128,6 +1130,7 @@ fn tool_names_by_launch_mode_match_hand_written_literal_lists() {
             "call-read",
             "call-reversible",
             "commands",
+            "found-jobs",
             "job",
             "profile",
         ],
@@ -1142,6 +1145,7 @@ fn tool_names_by_launch_mode_match_hand_written_literal_lists() {
             "call-read",
             "call-reversible",
             "commands",
+            "found-jobs",
             "job",
             "profile",
         ],

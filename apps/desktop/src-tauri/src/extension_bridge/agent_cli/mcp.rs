@@ -7,8 +7,9 @@
 //! legacy fallback.
 //!
 //! ## Three launch tiers over the [`Effect`] boundary
-//! Five curated, `readOnlyHint:true`, names/base descriptions derived from [`super::VERB_TABLE`]
-//! (never a second hand-typed copy): `best-matches`, `job`, `profile`, `automations`, and a LOCAL
+//! Six curated, `readOnlyHint:true`, names/base descriptions derived from [`super::VERB_TABLE`]
+//! (never a second hand-typed copy): `best-matches`, `job`, `profile`, `automations`,
+//! `found-jobs` (issue #1115 — paginated per-autopilot found-jobs traversal), and a LOCAL
 //! `commands` (no bridge call — works with the app closed) enumerating [`POLICY`] by `effect`.
 //! Three generic dispatch tools sit over that SAME table: `call-read` (always present),
 //! `call-reversible` (`--allow-reversible`), and `call-irreversible` (`--allow-irreversible`,
@@ -155,6 +156,7 @@ const TOOL_BEST_MATCHES: &str = "best-matches";
 const TOOL_JOB: &str = "job";
 const TOOL_PROFILE: &str = "profile";
 const TOOL_AUTOMATIONS: &str = "automations";
+const TOOL_FOUND_JOBS: &str = "found-jobs";
 const TOOL_COMMANDS: &str = "commands";
 const TOOL_CALL_READ: &str = "call-read";
 const TOOL_CALL_REVERSIBLE: &str = "call-reversible";
@@ -348,8 +350,8 @@ fn unavailable_reason(effect: &Effect) -> &'static str {
 }
 
 /// `tools/list`'s tool set for one [`Tier`] — the type itself carries "irreversible implies
-/// reversible" (see [`Tier`]'s own doc), so this fn never has to re-resolve it. Six tools at
-/// [`Tier::Read`] (the default: read tier + `commands`), seven at [`Tier::Reversible`], eight at
+/// reversible" (see [`Tier`]'s own doc), so this fn never has to re-resolve it. Seven tools at
+/// [`Tier::Read`] (the default: read tier + `commands`), eight at [`Tier::Reversible`], nine at
 /// [`Tier::Irreversible`].
 fn tools(tier: Tier) -> Vec<Value> {
     let call_target_schema = |extra_properties: Value, extra_required: &[&str]| {
@@ -392,6 +394,18 @@ fn tools(tier: Tier) -> Vec<Value> {
         ),
         curated_tool(TOOL_PROFILE, "", schema_object(json!({}), &[])),
         curated_tool(TOOL_AUTOMATIONS, "", schema_object(json!({}), &[])),
+        curated_tool(
+            TOOL_FOUND_JOBS,
+            UNTRUSTED_FIELDS_NOTICE,
+            schema_object(
+                json!({
+                    "autopilotId": { "type": "string", "description": "the target autopilot's id (see `automations`)" },
+                    "limit": { "type": "integer", "minimum": 1, "description": "rows to return (default 50, server cap 100)" },
+                    "cursor": { "type": "string", "description": "opaque-to-the-caller offset from a prior page's nextCursor; omit to start at the first page" },
+                }),
+                &["autopilotId"],
+            ),
+        ),
         json!({
             "name": TOOL_COMMANDS,
             "description": "Enumerate every command this server can dispatch through call-read/call-reversible/call-irreversible, grouped by Effect class. Local — no bridge call, works even with the app closed. A row this server wasn't launched to expose is still listed, marked \"unavailable\" with the flag that would expose it, never silently dropped.",
@@ -526,6 +540,25 @@ fn tool_argv(name: &str, arguments: &Value) -> Vec<String> {
         ],
         TOOL_PROFILE => vec!["profile".to_string()],
         TOOL_AUTOMATIONS => vec!["automations".to_string()],
+        TOOL_FOUND_JOBS => {
+            let mut argv = vec![
+                "found-jobs".to_string(),
+                arguments
+                    .get("autopilotId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ];
+            if let Some(limit) = arguments.get("limit") {
+                argv.push("--limit".to_string());
+                argv.push(value_as_arg(limit));
+            }
+            if let Some(cursor) = arguments.get("cursor").and_then(Value::as_str) {
+                argv.push("--cursor".to_string());
+                argv.push(cursor.to_string());
+            }
+            argv
+        }
         TOOL_CALL_READ | TOOL_CALL_REVERSIBLE | TOOL_CALL_IRREVERSIBLE => {
             let namespace = arguments
                 .get("namespace")

@@ -1,6 +1,6 @@
 # Agent CLI (`ajh-tauri agent <verb>`)
 
-Last updated: 2026-09-03
+Last updated: 2026-09-06
 
 A headless CLI mode of the shipped `ajh-tauri` binary, invoked alongside the running desktop app. Enables external programs (shell scripts, LLM agents, CI pipelines) to query job data, profile fields, and trigger commands without a GUI. The same binary, no separate install.
 
@@ -68,7 +68,8 @@ The agent CLI can run as an MCP (Model Context Protocol) stdio server, exposing 
 - **Refusals are results**: every app-side refusal, the CLI exit code and the confirm hint travel as `isError` text; the server's own sentinels are enumerated by a drift test in `mcp/tests.rs`. A result over the byte cap constant in `mcp.rs` is refused, never truncated. `structuredContent` is not emitted.
 - **Confirmation ceremony**: unchanged from ADR-038 §4 — read the proof with `call-read`, pass it back verbatim on `call-irreversible`; the server never resolves a proof itself.
 - **Throttle and deadline**: the CLI's per-invocation deadline and the global throttle beside `BridgeState` in `agent_read.rs` apply unchanged. Bridge-backed calls are single-flight in input order (exactly one dispatch in flight at any instant, queued calls run strictly FIFO), so the throttle bound remains one bridge connection per process. Local tools and protocol methods answer immediately (ADR-040 §12).
-- **Personal data**: any `Read` row that returns user data reaches the client's AI provider and its persisted transcript — the `commands` tool and `POLICY` in `policy.rs` are the list. Third-party posting text is fenced per surface (`fence_description` and `fence_posting_display_fields` in `agent_read.rs`; `fence_scraped_fields` on the generic tier) and the server's `instructions` say the spans are untrusted.
+- **Personal data**: any `Read` row that returns user data reaches the client's AI provider and its persisted transcript — the `commands` tool and `POLICY` in `policy.rs` are the list. Third-party posting text is fenced per surface (`fence_description` and `fence_posting_display_fields` in `agent_read.rs`, `fence_found_jobs_description` in `agent_read/found_jobs.rs`; `fence_scraped_fields` on the generic tier) and the server's `instructions` say the spans are untrusted.
+- **`found-jobs`** (issue #1115): the one curated resource that paginates rather than returning everything at once — `autopilot_get`/`autopilot_list`/`autopilot_best_matches` cannot enumerate one autopilot's complete `found_jobs` list (unbounded record vs. a cross-autopilot top-N ranking). Cursor is a plain offset into the stored order; the page-size derivation and the projected field list both live as doc comments on `agent_read::found_jobs::MAX_FOUND_JOBS_LIMIT`/`FoundJobSlice` (its own module, split out under the R8 LOC cap), never restated here.
 
 **See also**: [ADR-040](decision-records/adr-040-mcp-server-as-agent-cli-mode.md) for the decisions and their reasoning.
 

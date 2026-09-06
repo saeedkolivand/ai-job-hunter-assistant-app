@@ -1,8 +1,11 @@
 //! `agent.query` → `agent.result` — the read-only agent/CLI surface (issue
-//! #1084, PR 1). Five resources, one dispatch table ([`RESOURCES`]):
+//! #1084, PR 1). Six resources, one dispatch table ([`RESOURCES`]):
 //! `best-matches` (optional `limit`), `job` (`url` required), `profile`,
-//! `automations`, `schema`. `url` is the CROSS-RESOURCE KEY — not an id (a
-//! `best-matches` row's own `key` is a cluster id, never echoed here).
+//! `automations`, `schema`, `found-jobs` (issue #1115 — `autopilotId`
+//! required, optional `limit`/`cursor`). `url` is the CROSS-RESOURCE KEY for
+//! `job` — not an id (a `best-matches` row's own `key` is a cluster id,
+//! never echoed here); `found-jobs` instead keys off `autopilotId` since it
+//! must survive across autopilots that legitimately share a posting.
 //!
 //! ## Allowlist projections, absent by construction
 //! Every payload below is built by [`project`]: round-trip the SOURCE value
@@ -47,6 +50,12 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, AppResult};
 
+// R8 LOC-cap split (`docs/architecture-rules.md`) — `found-jobs` (issue
+// #1115) is large enough (allowlist struct + pagination + its own tests)
+// that inlining it here pushed this module over the hard cap; see that
+// file's own doc for why it can still reach every private item here.
+mod found_jobs;
+
 // ── Resource table (schema's single source of truth) ───────────────────────
 
 const RES_BEST_MATCHES: &str = "best-matches";
@@ -54,6 +63,7 @@ const RES_JOB: &str = "job";
 const RES_PROFILE: &str = "profile";
 const RES_AUTOMATIONS: &str = "automations";
 const RES_SCHEMA: &str = "schema";
+const RES_FOUND_JOBS: &str = "found-jobs";
 
 /// `(name, description)` — `schema` maps this directly; [`handle_agent_query`]'s
 /// `match` uses these SAME constants as its patterns (never a second literal),
@@ -73,6 +83,12 @@ const RESOURCES: &[(&str, &str)] = &[
     ),
     (RES_AUTOMATIONS, "Every autopilot and its status."),
     (RES_SCHEMA, "This resource list."),
+    (
+        RES_FOUND_JOBS,
+        "Paginated traversal of ONE autopilot's complete found-jobs list (issue #1115). \
+         `autopilotId` required, optional `limit`/`cursor` — repeat with the returned \
+         `nextCursor` until it is `null`.",
+    ),
 ];
 
 fn schema_value() -> Value {
@@ -644,6 +660,7 @@ pub(super) async fn handle_agent_query(app: &AppHandle, req_id: &str, payload: &
         RES_JOB => job_resource(app, payload),
         RES_PROFILE => profile_resource(app),
         RES_AUTOMATIONS => automations_resource(app),
+        RES_FOUND_JOBS => found_jobs::found_jobs_resource(app, payload),
         RES_SCHEMA => Ok(schema_value()),
         other => Err(AppError::Validation(format!(
             "unknown agent resource '{other}'"
@@ -672,7 +689,11 @@ mod tests {
     /// struct (verified by hand during review; not re-run here since it would
     /// require mutating a sibling domain's type). `AgentTrust`'s own explicit
     /// field set is what makes it pass now.
-    fn assert_object_keys(value: &Value, path: &str, expected: &[&str]) {
+    ///
+    /// `pub(super)` — reused verbatim by `found_jobs::tests` (a sibling
+    /// module, not a descendant of this one) so that module's fixtures never
+    /// drift from these.
+    pub(super) fn assert_object_keys(value: &Value, path: &str, expected: &[&str]) {
         let obj = value
             .as_object()
             .unwrap_or_else(|| panic!("{path} must be an object, got {value}"));
@@ -694,7 +715,14 @@ mod tests {
         // loop-over-own-fields test with a hand-written literal list" lesson.
         assert_eq!(
             names,
-            vec!["automations", "best-matches", "job", "profile", "schema"]
+            vec![
+                "automations",
+                "best-matches",
+                "found-jobs",
+                "job",
+                "profile",
+                "schema"
+            ]
         );
     }
 
@@ -708,7 +736,8 @@ mod tests {
 
     // ── job ──────────────────────────────────────────────────────────────────
 
-    fn full_found_job() -> FoundJob {
+    /// `pub(super)` — reused verbatim by `found_jobs::tests`.
+    pub(super) fn full_found_job() -> FoundJob {
         FoundJob {
             title: "Backend Engineer".into(),
             company: "Acme".into(),
@@ -897,7 +926,8 @@ mod tests {
 
     // ── automations ──────────────────────────────────────────────────────────
 
-    fn blank_autopilot(id: &str) -> Autopilot {
+    /// `pub(super)` — reused verbatim by `found_jobs::tests`.
+    pub(super) fn blank_autopilot(id: &str) -> Autopilot {
         Autopilot {
             id: id.into(),
             name: format!("autopilot-{id}"),
@@ -1196,7 +1226,13 @@ mod tests {
         let job = project_value::<_, AgentJob>(&full_found_job()).unwrap();
         let automations = resolve_automations(&[blank_autopilot("ap-1")]);
         let best_matches = resolve_best_matches(&[full_best_match_row_json()], 1, 20);
-        for value in [job, automations, best_matches] {
+        let found_jobs_records = vec![Autopilot {
+            found_jobs: vec![full_found_job()],
+            ..blank_autopilot("ap-1")
+        }];
+        let found_jobs =
+            found_jobs::resolve_found_jobs(&found_jobs_records, "ap-1", 0, 20).unwrap();
+        for value in [job, automations, best_matches, found_jobs] {
             let text = value.to_string();
             for forbidden in [
                 "resumeText",
