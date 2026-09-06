@@ -1039,9 +1039,11 @@ fn curated_tool_joins_base_and_extra_as_two_sentences_not_a_run_on() {
 }
 
 #[test]
-fn job_carries_the_same_untrusted_fields_notice_as_best_matches() {
-    // pre-PR gate — `job` returns the identical title/company/location fields best-matches
-    // does (both now fenced), so both tools' descriptions must carry the identical notice.
+fn every_scraped_text_tool_carries_the_same_untrusted_fields_notice() {
+    // pre-PR gate, extended in review round 2 (MEDIUM — `found-jobs` was added without
+    // extending this pairwise check, the exact class of gap `#1088` warns about): every
+    // curated tool that returns title/company/location/description scraped text must carry
+    // the IDENTICAL notice as `best-matches`, never a fresh one-off pair test per new tool.
     let list = tools(Tier::Read);
     let notice = list
         .iter()
@@ -1053,14 +1055,16 @@ fn job_carries_the_same_untrusted_fields_notice_as_best_matches() {
         .unwrap()
         .1
         .to_string();
-    let job_description = list.iter().find(|t| t["name"] == TOOL_JOB).unwrap()["description"]
-        .as_str()
-        .unwrap();
-    assert!(
-        job_description.contains(&notice),
-        "job's description must carry the same untrusted-fields notice as best-matches: \
-         {job_description}"
-    );
+    for tool in [TOOL_JOB, TOOL_FOUND_JOBS] {
+        let description = list.iter().find(|t| t["name"] == tool).unwrap()["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains(&notice),
+            "{tool}'s description must carry the same untrusted-fields notice as best-matches: \
+             {description}"
+        );
+    }
 }
 
 // ── Tier (item 21) ───────────────────────────────────────────────────────
@@ -1418,6 +1422,67 @@ fn a_confirm_argument_sent_to_call_read_is_silently_ignored() {
             command: "jobs_list".to_string(),
             input: json!({}),
             confirm: None,
+        }
+    );
+}
+
+// ── found-jobs tool_argv mapping (MEDIUM fix, review round 2 — this new arm had no
+// coverage at all) ───────────────────────────────────────────────────────────────
+
+#[test]
+fn found_jobs_tool_argv_maps_autopilot_id_limit_and_cursor() {
+    let arguments = json!({ "autopilotId": "ap-1", "limit": 10, "cursor": "20" });
+    let argv = tool_argv(TOOL_FOUND_JOBS, &arguments);
+    assert_eq!(
+        parse_verb(&argv).unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: Some(10),
+            cursor: Some("20".to_string()),
+        }
+    );
+}
+
+#[test]
+fn found_jobs_tool_argv_omits_optional_flags_when_absent() {
+    let argv = tool_argv(TOOL_FOUND_JOBS, &json!({ "autopilotId": "ap-1" }));
+    assert_eq!(
+        parse_verb(&argv).unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: None,
+            cursor: None,
+        }
+    );
+}
+
+/// HIGH fix, review round 2 — a JSON NUMBER `cursor` (as a real MCP client would send,
+/// since the declared schema type is `string` but nothing on the wire enforces that) must
+/// still reach `parse_verb` as a string, not be dropped as if the caller had sent nothing.
+#[test]
+fn found_jobs_tool_argv_forwards_a_numeric_cursor_rather_than_dropping_it() {
+    let arguments = json!({ "autopilotId": "ap-1", "cursor": 100 });
+    let argv = tool_argv(TOOL_FOUND_JOBS, &arguments);
+    assert_eq!(
+        parse_verb(&argv).unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: None,
+            cursor: Some("100".to_string()),
+        }
+    );
+}
+
+#[test]
+fn found_jobs_tool_argv_treats_an_explicit_null_cursor_as_absent() {
+    let arguments = json!({ "autopilotId": "ap-1", "cursor": null });
+    let argv = tool_argv(TOOL_FOUND_JOBS, &arguments);
+    assert_eq!(
+        parse_verb(&argv).unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: None,
+            cursor: None,
         }
     );
 }

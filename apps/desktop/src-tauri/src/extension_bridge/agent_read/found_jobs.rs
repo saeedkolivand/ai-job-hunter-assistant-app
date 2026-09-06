@@ -31,8 +31,9 @@ use super::{fence_posting_display_fields, list_autopilots, project_value, AgentT
 ///
 /// `description` is fenced at [`FOUND_JOBS_DESCRIPTION_PREVIEW_CAP`], NOT
 /// `crate::prompt_fence::JOB_CAP` — see that constant's own doc for why a
-/// list view needs a materially smaller per-field budget than the
-/// single-job `job` resource.
+/// list view still wants a smaller per-field budget than the single-job
+/// `job` resource, even though [`PAGE_BYTE_BUDGET`] (not this cap) is what
+/// actually keeps a page under the MCP transport limit now.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FoundJobSlice {
@@ -64,48 +65,55 @@ struct FoundJobSlice {
 
 /// `description`'s fence cap for `found-jobs`, distinct from
 /// `crate::prompt_fence::JOB_CAP` (used by the single-job `job` resource and
-/// by `best-matches`' title/company/location fields). A LIST endpoint pages
-/// through up to [`MAX_FOUND_JOBS_LIMIT`] rows per call, so its per-field
-/// budget has to be sized for a FULL PAGE, not one row — see
-/// [`MAX_FOUND_JOBS_LIMIT`]'s own doc for the arithmetic this cap feeds. 500
-/// chars is enough to show what a posting is about (title + a couple of
-/// sentences); a caller that needs the full text already has `job`, keyed
-/// by this same row's `url`.
-const FOUND_JOBS_DESCRIPTION_PREVIEW_CAP: usize = 500;
-
-/// Server-side default/cap for `found-jobs`' `limit` (same clamp-before-
-/// serializing discipline as `agent_read::clamp_best_matches_limit`).
+/// by `best-matches`' title/company/location fields) — a caller that needs
+/// the full posting text already has `job`, keyed by this same row's `url`.
 ///
-/// **The arithmetic, so this number can be re-derived rather than trusted:**
-/// issue #1115 measured every real autopilot's FULL `Autopilot` record
-/// (459 KB–1.87 MB) but not its `found_jobs` COUNT, so an average per-job
-/// size can't be read off that table directly — and an average would be the
-/// wrong input anyway, since a page can legitimately be all rich rows. This
-/// resource instead bounds the WORST REALISTIC per-row size directly: every
-/// text field `found-jobs` returns is fenced (title/company/location at
-/// `crate::prompt_fence::JOB_CAP` = 8,000 chars each, `description` at
-/// [`FOUND_JOBS_DESCRIPTION_PREVIEW_CAP`] = 500 chars), and `fenced`'s own
-/// doc bounds its growth over the input at "one extra char per `<` and per
-/// `[tool_result` occurrence, plus a ~20-byte wrapper" — realistic (not
-/// degenerate-adversarial) title/company/location text runs well under 200
-/// bytes each in every autopilot this issue measured, so a realistic
-/// richest row (long-ish title/company/location, a full 500-char
-/// description, every optional numeric/trust field populated) serializes to
-/// roughly 1.1–1.4 KB — pinned by
-/// `found_jobs_page_stays_safely_under_the_mcp_cap` below, which measures
-/// the REAL serialized bytes of [`MAX_FOUND_JOBS_LIMIT`] such rows rather
-/// than trusting this comment. Targeting HALF of
-/// `agent_cli::mcp::MCP_RESULT_MAX_BYTES` (256 KiB) as the full-page budget
-/// — real margin against the MCP wrapper (`content[]`/`isError` envelope)
-/// and against a row landing above this comment's estimate — gives
-/// 131,072 / 1,400 ≈ 93; **100** is the round number under that with a
-/// comfortable margin. Default is lower than max (cheap in-memory slice, no
-/// compute-cost reason to default low, but a smaller default keeps a
-/// casual/exploratory first call well under budget even in the wildly
-/// unlikely case every one of 100 jobs hit the worst-realistic size at
-/// once).
-const DEFAULT_FOUND_JOBS_LIMIT: usize = 50;
-const MAX_FOUND_JOBS_LIMIT: usize = 100;
+/// **2,000 chars** (up from an original 500 — pre-PR review round 2, HIGH:
+/// 500 chars is mostly boilerplate and not enough to actually
+/// qualify/dismiss a posting, defeating this resource's whole stated
+/// purpose, and — since [`PAGE_BYTE_BUDGET`] is now what actually enforces
+/// the transport cap, not a per-field size assumption — there is no longer
+/// a reason to starve every row for that cap's sake).
+const FOUND_JOBS_DESCRIPTION_PREVIEW_CAP: usize = 2_000;
+
+/// Server-side default/cap for `found-jobs`' `limit` — a CEILING on how much
+/// work one call does (project + fence up to this many rows before
+/// trimming), never the actual transport-size guarantee. That guarantee is
+/// [`PAGE_BYTE_BUDGET`] (below), enforced by [`trim_to_byte_budget`] against
+/// the REAL serialized bytes of whatever rows actually came back — a
+/// row-count limit alone was proven insufficient in review (an ordinary,
+/// non-adversarial page containing title/company/location text of the
+/// length real postings actually use — up to `crate::prompt_fence::JOB_CAP`
+/// = 8,000 chars each, not a short-string assumption — could reach ~2.5 MB
+/// at 100 rows, 9.5× the transport cap, with zero attacker involvement).
+///
+/// These two numbers are sized for the ORDINARY case, so trimming rarely
+/// fires: a typical row (short title/company/location, a full
+/// [`FOUND_JOBS_DESCRIPTION_PREVIEW_CAP`]-length description, every
+/// optional field populated) serializes to roughly 2.6–2.7 KB — measured by
+/// `found_jobs_typical_page_rarely_needs_trimming` below — so
+/// [`MAX_FOUND_JOBS_LIMIT`] rows of that shape total well under
+/// [`PAGE_BYTE_BUDGET`], and a caller asking for the max in the common case
+/// gets exactly that many rows back, not a silently-truncated page.
+const DEFAULT_FOUND_JOBS_LIMIT: usize = 25;
+const MAX_FOUND_JOBS_LIMIT: usize = 50;
+
+/// The REAL per-response safety net (pre-PR review round 2, HIGH — a
+/// row-count limit cannot bound a page's byte size because a legitimate,
+/// non-adversarial posting's title/company/location can each independently
+/// reach `crate::prompt_fence::JOB_CAP` = 8,000 chars, and this resource has
+/// no way to know that in advance of fencing the row). [`trim_to_byte_budget`]
+/// checks the ACTUAL serialized bytes of the candidate page and drops rows
+/// from the end — content-independent and exact, unlike trusting any
+/// per-row size assumption.
+///
+/// Target: half of `agent_cli::mcp::MCP_RESULT_MAX_BYTES` (256 KiB = 262,144
+/// B), leaving real margin for the MCP `content[]`/`isError` wrapper this
+/// payload rides inside on the MCP transport (this resource's own `Value`
+/// carries `jobs`/`nextCursor`/`total`/`autopilotId`/`autopilotName` too,
+/// not just the `jobs` array [`trim_to_byte_budget`] measures) and for
+/// anything this comment's math didn't anticipate.
+const PAGE_BYTE_BUDGET: usize = 150_000;
 
 fn clamp_found_jobs_limit(payload: &Value) -> usize {
     payload
@@ -115,6 +123,35 @@ fn clamp_found_jobs_limit(payload: &Value) -> usize {
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_FOUND_JOBS_LIMIT)
         .min(MAX_FOUND_JOBS_LIMIT)
+}
+
+/// Drop rows from the end of `candidates` until the serialized `jobs` array
+/// fits [`PAGE_BYTE_BUDGET`] — the real transport-size guarantee (see that
+/// constant's own doc). Walks forward summing each row's OWN serialized
+/// length (plus a one-byte array separator per row after the first) rather
+/// than re-serializing the whole growing array on every step, so this is
+/// O(n) `to_string` calls total, not O(n²) — cheap even at
+/// [`MAX_FOUND_JOBS_LIMIT`]'s scale. Always keeps at least one row when
+/// `candidates` is non-empty (forward-progress guarantee: a page cannot
+/// hang the traversal by returning zero rows and a `nextCursor` that never
+/// advances) — in practice unreachable at today's field caps, since even
+/// title+company+location all pinned to `crate::prompt_fence::JOB_CAP` plus
+/// a full [`FOUND_JOBS_DESCRIPTION_PREVIEW_CAP`] description serializes to
+/// well under [`PAGE_BYTE_BUDGET`] for a single row.
+fn trim_to_byte_budget(candidates: Vec<Value>) -> Vec<Value> {
+    let mut cumulative = 2; // the array's own "[" + "]"
+    let mut kept = 0;
+    for (i, row) in candidates.iter().enumerate() {
+        let row_len = serde_json::to_string(row).map_or(usize::MAX, |s| s.len());
+        let separator = usize::from(i > 0); // a comma between rows
+        let next = cumulative + separator + row_len;
+        if next > PAGE_BYTE_BUDGET && kept > 0 {
+            break;
+        }
+        cumulative = next;
+        kept = i + 1;
+    }
+    candidates.into_iter().take(kept).collect()
 }
 
 /// Fixed sentinel — mirrors `agent_read::JOB_NOT_FOUND_MESSAGE`'s "never
@@ -137,17 +174,29 @@ fn fence_found_jobs_description(value: &mut Value) {
 }
 
 /// Pure core of `found-jobs`: find the named autopilot, slice its
-/// `found_jobs` at `[offset, offset + limit)`, and project + fence each row.
-/// `offset` is a plain index into the STORED order — stable across calls
-/// because `found_jobs` is only ever reordered by a `record_run` dedup merge
-/// or a `dedup_mark_not_duplicate` split (both writes, never triggered by a
-/// read), so "repeated calls with the same cursor return the same slice"
-/// holds as long as no run/split lands between them (the issue's own
-/// caveat: "barring concurrent discovery"). Directly unit-testable with
-/// hand-built `Autopilot` records, no `AppHandle` — same pure/impure split
-/// as `agent_read::resolve_job`/`agent_read::resolve_best_matches`.
-/// `pub(super)` because `agent_read`'s own `no_resource_output_ever_carries_a_forbidden_key`
-/// test calls this directly to sweep every resource's output in one place.
+/// `found_jobs` at `[offset, offset + limit)`, project + fence each row,
+/// then [`trim_to_byte_budget`] the result before returning it.
+/// `offset` is a plain index into the STORED order — stable across calls as
+/// long as nothing writes to `found_jobs` between them, which
+/// `AutopilotStore::record_run`'s merge (`autopilot::merge_found_jobs`) and
+/// `dedup_mark_not_duplicate` both do. If either DOES land mid-traversal,
+/// the direction of the drift is specific, not a vague "might race": a
+/// `record_run` merge PREPENDS every genuinely-new job to the FRONT of
+/// `found_jobs` and removes nothing (`merge_found_jobs`'s own doc — "New
+/// jobs go on top"), so a scheduled run between two calls of the SAME
+/// traversal shifts every existing job's index forward by however many new
+/// jobs were prepended. Continuing from the OLD numeric offset after that
+/// shift re-serves rows the caller already saw (DUPLICATES, never a skip —
+/// nothing is ever removed), while the newest jobs — now sitting at indices
+/// below the already-passed offset — become unreachable by that same
+/// traversal. `total` moving between calls is the caller-visible signal
+/// this happened; a caller that cares should restart from `cursor: null`
+/// rather than trust a `total` that grew mid-traversal. Directly
+/// unit-testable with hand-built `Autopilot` records, no `AppHandle` — same
+/// pure/impure split as `agent_read::resolve_job`/
+/// `agent_read::resolve_best_matches`. `pub(super)` because `agent_read`'s
+/// own `no_resource_output_ever_carries_a_forbidden_key` test calls this
+/// directly to sweep every resource's output in one place.
 ///
 /// A plain offset was chosen over an opaque token per issue #1115's own
 /// guidance to reuse an existing pagination convention first:
@@ -171,7 +220,7 @@ pub(super) fn resolve_found_jobs(
         .ok_or_else(|| AppError::Validation(AUTOPILOT_NOT_FOUND_MESSAGE.to_string()))?;
 
     let total = autopilot.found_jobs.len();
-    let page: Vec<Value> = autopilot
+    let candidates: Vec<Value> = autopilot
         .found_jobs
         .iter()
         .skip(offset)
@@ -183,6 +232,7 @@ pub(super) fn resolve_found_jobs(
             value
         })
         .collect();
+    let page = trim_to_byte_budget(candidates);
 
     let returned = page.len();
     let next_offset = offset + returned;
@@ -201,16 +251,23 @@ pub(super) fn resolve_found_jobs(
     }))
 }
 
-/// Parse `payload`'s `cursor` — absent means "start at 0"; anything present
-/// that doesn't parse as a plain non-negative integer is a caller error
-/// (never silently reset to page 1, which would look like forward progress
-/// while actually restarting the traversal).
+/// Parse `payload`'s `cursor` — absent (or explicit `null`) means "start at
+/// 0"; anything else that doesn't parse as a plain non-negative integer is a
+/// caller error (never silently reset to page 1, which would look like
+/// forward progress while actually restarting the traversal). Matches on
+/// the `Value` variant directly (HIGH fix, pre-PR review round 2) rather
+/// than `.and_then(Value::as_str)`: that combinator returns `None` for a
+/// JSON NUMBER cursor too, not just for an absent one, so `{"cursor": 100}`
+/// used to collapse silently to `Ok(0)` instead of being read as offset 100
+/// or rejected — exactly the failure mode this function's own contract
+/// promises never happens.
 fn parse_found_jobs_cursor(payload: &Value) -> AppResult<usize> {
-    match payload.get("cursor").and_then(Value::as_str) {
-        None => Ok(0),
-        Some(raw) => raw
+    match payload.get("cursor") {
+        None | Some(Value::Null) => Ok(0),
+        Some(Value::String(raw)) => raw
             .parse::<usize>()
             .map_err(|_| AppError::Validation(INVALID_CURSOR_MESSAGE.to_string())),
+        Some(_) => Err(AppError::Validation(INVALID_CURSOR_MESSAGE.to_string())),
     }
 }
 
@@ -346,6 +403,14 @@ mod tests {
 
     #[test]
     fn found_jobs_description_uses_the_smaller_list_preview_cap() {
+        // All-`x` input contains no `<` and no `[tool_result` — `fenced`'s
+        // neutralization pass is a no-op on it — so the exact output length
+        // is deterministic: the capped body plus its fixed wrapper
+        // (`<job_posting>\n` + `\n</job_posting>`). An exact `assert_eq!`
+        // here (tightened from a loose `< CAP * 2`, pre-PR review round 2 —
+        // that bound was loose enough to pass even at DOUBLE the real cap)
+        // is a real guard: it fails the moment either cap or the wrapper
+        // shape changes, not just when capping stops happening at all.
         let huge = "x".repeat(FOUND_JOBS_DESCRIPTION_PREVIEW_CAP * 3);
         let records = vec![autopilot_with_jobs(
             "ap-1",
@@ -356,10 +421,11 @@ mod tests {
         )];
         let out = resolve_found_jobs(&records, "ap-1", 0, 20).expect("found");
         let desc = out["jobs"][0]["description"].as_str().unwrap();
-        assert!(
-            desc.chars().count() < FOUND_JOBS_DESCRIPTION_PREVIEW_CAP * 2,
-            "an uncapped description must not reach the agent surface: {} chars",
-            desc.chars().count()
+        let wrapper_len = "<job_posting>\n".len() + "\n</job_posting>".len();
+        assert_eq!(
+            desc.chars().count(),
+            FOUND_JOBS_DESCRIPTION_PREVIEW_CAP + wrapper_len,
+            "an uncapped description must be truncated to exactly the cap plus the fence wrapper"
         );
     }
 
@@ -459,15 +525,37 @@ mod tests {
         assert_eq!(err.to_string(), INVALID_CURSOR_MESSAGE);
     }
 
+    /// HIGH fix, pre-PR review round 2 — `{"cursor": 100}` (a JSON NUMBER,
+    /// not a string) used to collapse silently to offset 0 via
+    /// `.and_then(Value::as_str)` returning `None` for a non-string just
+    /// like it does for an absent key. Must now be a clean rejection, never
+    /// a silent restart of the traversal.
+    #[test]
+    fn found_jobs_rejects_a_numeric_cursor_rather_than_silently_resetting() {
+        let err = parse_found_jobs_cursor(&json!({ "cursor": 100 })).unwrap_err();
+        assert_eq!(err.to_string(), INVALID_CURSOR_MESSAGE);
+    }
+
     #[test]
     fn found_jobs_cursor_defaults_to_zero_when_absent() {
         assert_eq!(parse_found_jobs_cursor(&json!({})).unwrap(), 0);
     }
 
-    /// A realistic-but-rich job: long-ish title/company/location, a full
+    /// An explicit JSON `null` is absent-like, not a type error — mirrors
+    /// `mcp.rs`'s `tool_argv` treating a `null` `cursor` argument the same
+    /// way rather than forwarding the literal string `"null"`.
+    #[test]
+    fn found_jobs_cursor_null_is_treated_like_absent() {
+        assert_eq!(
+            parse_found_jobs_cursor(&json!({ "cursor": null })).unwrap(),
+            0
+        );
+    }
+
+    /// A realistic-but-rich job: short title/company/location, a full
     /// preview-cap description, every optional numeric/trust field
-    /// populated — the shape [`MAX_FOUND_JOBS_LIMIT`]'s doc comment derives
-    /// its arithmetic from.
+    /// populated — the ORDINARY shape [`MAX_FOUND_JOBS_LIMIT`]'s doc
+    /// comment says a full page should rarely need trimming for.
     fn richest_realistic_job(n: usize) -> FoundJob {
         FoundJob {
             title: format!("Senior Backend Engineer - Distributed Systems, Platform Team #{n}"),
@@ -501,44 +589,159 @@ mod tests {
         }
     }
 
-    /// **The measured guard** [`MAX_FOUND_JOBS_LIMIT`]'s doc comment
-    /// promises: a FULL page of the richest realistic row stays comfortably
-    /// under `agent_cli::mcp::MCP_RESULT_MAX_BYTES` (256 KiB), with real
-    /// margin — not a page-count assertion, an actual serialized byte count.
+    /// A page of `MAX_FOUND_JOBS_LIMIT` ordinary-but-rich rows should come
+    /// back WHOLE (no trimming) and comfortably under the MCP transport cap
+    /// — this is the "trimming rarely fires" claim [`MAX_FOUND_JOBS_LIMIT`]'s
+    /// doc comment makes, pinned by measurement rather than trusted.
     #[test]
-    fn found_jobs_page_stays_safely_under_the_mcp_cap() {
+    fn found_jobs_typical_page_rarely_needs_trimming() {
         const MCP_RESULT_MAX_BYTES: usize = 256 * 1024;
         let jobs: Vec<FoundJob> = (0..MAX_FOUND_JOBS_LIMIT)
             .map(richest_realistic_job)
             .collect();
         let records = vec![autopilot_with_jobs("ap-1", jobs)];
         let out = resolve_found_jobs(&records, "ap-1", 0, MAX_FOUND_JOBS_LIMIT).unwrap();
+        assert_eq!(
+            out["jobs"].as_array().unwrap().len(),
+            MAX_FOUND_JOBS_LIMIT,
+            "an ordinary full page must not need trimming"
+        );
         let bytes = out.to_string().len();
         assert!(
-            bytes < MCP_RESULT_MAX_BYTES / 2,
-            "a full richest-realistic page must stay well under half the MCP cap for real \
-             margin, was {bytes} bytes (cap {MCP_RESULT_MAX_BYTES})"
+            bytes < MCP_RESULT_MAX_BYTES,
+            "an ordinary full page must stay under the MCP cap, was {bytes} bytes"
         );
     }
 
-    /// **Mutation check** for the guard above — proves it is a real
-    /// assertion, not a tautology that would pass no matter what the limit
-    /// was. A page of `MAX_FOUND_JOBS_LIMIT * 20` richest-realistic rows
-    /// (simulating a limit bumped far past what this resource actually
-    /// serves) MUST fail the same margin check, confirming the guard would
-    /// actually catch an oversized limit.
+    /// A job at the REAL permitted worst case: title/company/location each
+    /// pinned to `crate::prompt_fence::JOB_CAP` (8,000 chars), in
+    /// multi-byte CJK text (stresses the char-vs-byte distinction — a
+    /// char-counted cap is NOT a byte cap), plus a full-length preview
+    /// description. This is legitimate, non-adversarial content a board
+    /// could genuinely return (a verbose, non-Latin-script posting) — the
+    /// exact shape pre-PR review round 2 found broke a row-count-only limit.
+    fn worst_permitted_job(n: usize) -> FoundJob {
+        // U+4E2D ("中") is 3 bytes in UTF-8 — repeating it stresses the
+        // byte/char gap far more than an ASCII fixture ever could.
+        let cjk_field = |cap: usize| "中".repeat(cap);
+        FoundJob {
+            title: cjk_field(crate::prompt_fence::JOB_CAP),
+            company: cjk_field(crate::prompt_fence::JOB_CAP),
+            url: format!("https://boards.example.com/jobs/{n}"),
+            location: Some(cjk_field(crate::prompt_fence::JOB_CAP)),
+            board: Some("adzuna".to_string()),
+            description: Some(cjk_field(FOUND_JOBS_DESCRIPTION_PREVIEW_CAP)),
+            ..full_found_job()
+        }
+    }
+
+    /// The untrimmed candidate page for [`worst_permitted_job`] rows
+    /// genuinely exceeds [`PAGE_BYTE_BUDGET`] — the premise
+    /// [`found_jobs_trims_an_oversized_page_and_keeps_the_cursor_correct`]
+    /// depends on. Written as its own assertion (not folded into that test)
+    /// so a future change that shrinks the worst case below the budget
+    /// fails LOUDLY here instead of the trimming test just quietly stopping
+    /// short of exercising trimming at all.
     #[test]
-    fn found_jobs_size_guard_would_actually_fail_for_a_bloated_limit() {
-        const MCP_RESULT_MAX_BYTES: usize = 256 * 1024;
-        let inflated_limit = MAX_FOUND_JOBS_LIMIT * 20;
-        let jobs: Vec<FoundJob> = (0..inflated_limit).map(richest_realistic_job).collect();
-        let records = vec![autopilot_with_jobs("ap-1", jobs)];
-        let out = resolve_found_jobs(&records, "ap-1", 0, inflated_limit).unwrap();
-        let bytes = out.to_string().len();
+    fn worst_permitted_page_actually_exceeds_the_byte_budget_untrimmed() {
+        let candidates: Vec<Value> = (0..MAX_FOUND_JOBS_LIMIT)
+            .map(worst_permitted_job)
+            .filter_map(|job| project_value::<_, FoundJobSlice>(&job))
+            .map(|mut value| {
+                fence_found_jobs_description(&mut value);
+                fence_posting_display_fields(&mut value);
+                value
+            })
+            .collect();
+        let untrimmed_bytes = serde_json::to_string(&candidates).unwrap().len();
         assert!(
-            bytes >= MCP_RESULT_MAX_BYTES / 2,
-            "a {inflated_limit}-row page must be large enough to prove the margin check above \
-             is a real guard, was only {bytes} bytes"
+            untrimmed_bytes > PAGE_BYTE_BUDGET,
+            "the fixture must actually exceed the budget untrimmed to prove trimming does real \
+             work, was {untrimmed_bytes} bytes (budget {PAGE_BYTE_BUDGET})"
         );
+    }
+
+    /// The real guard: worst-permitted content gets TRIMMED to fit
+    /// [`PAGE_BYTE_BUDGET`] (proven non-tautological by the sibling test
+    /// above), the whole envelope stays under the MCP transport cap, and —
+    /// critically — `nextCursor` reflects how many rows were ACTUALLY kept,
+    /// not how many were requested, so a second call from that cursor picks
+    /// up exactly where the first left off with no skip and no duplicate.
+    #[test]
+    fn found_jobs_trims_an_oversized_page_and_keeps_the_cursor_correct() {
+        const MCP_RESULT_MAX_BYTES: usize = 256 * 1024;
+        let total_jobs = MAX_FOUND_JOBS_LIMIT * 2;
+        let jobs: Vec<FoundJob> = (0..total_jobs).map(worst_permitted_job).collect();
+        let records = vec![autopilot_with_jobs("ap-1", jobs)];
+
+        let page1 = resolve_found_jobs(&records, "ap-1", 0, MAX_FOUND_JOBS_LIMIT).unwrap();
+        let kept = page1["jobs"].as_array().unwrap().len();
+        assert!(
+            kept < MAX_FOUND_JOBS_LIMIT,
+            "worst-permitted content must actually trigger trimming, kept {kept} of \
+             {MAX_FOUND_JOBS_LIMIT} requested"
+        );
+        assert!(kept > 0, "at least one row must always come back");
+        let bytes = page1.to_string().len();
+        assert!(
+            bytes < MCP_RESULT_MAX_BYTES,
+            "a trimmed page must stay under the MCP cap, was {bytes} bytes"
+        );
+        assert_eq!(
+            page1["nextCursor"].as_str().unwrap(),
+            kept.to_string(),
+            "nextCursor must reflect rows ACTUALLY kept, not the requested limit"
+        );
+
+        // The next page must start exactly at `kept` — no row skipped, none repeated.
+        let page2 = resolve_found_jobs(&records, "ap-1", kept, MAX_FOUND_JOBS_LIMIT).unwrap();
+        let first_url_page2 = page2["jobs"][0]["url"].as_str().unwrap();
+        assert_eq!(
+            first_url_page2,
+            format!("https://boards.example.com/jobs/{kept}"),
+            "the row immediately after the trimmed page must be next, not skipped or repeated"
+        );
+    }
+
+    #[test]
+    fn trim_to_byte_budget_keeps_everything_when_already_under_budget() {
+        let small: Vec<Value> = (0..5).map(|i| json!({ "i": i })).collect();
+        let trimmed = trim_to_byte_budget(small.clone());
+        assert_eq!(trimmed, small);
+    }
+
+    #[test]
+    fn trim_to_byte_budget_drops_rows_from_the_end_until_it_fits() {
+        // Every row is the same fixed size once serialized (`{"s":"aaaa...a"}` with a
+        // 1,000-char field) — deterministic, so "one more row would have overflowed"
+        // is directly checkable below rather than merely assumed.
+        let row = json!({ "s": "a".repeat(1000) });
+        let row_len = serde_json::to_string(&row).unwrap().len();
+        let candidates: Vec<Value> = (0..500).map(|_| row.clone()).collect();
+        let trimmed = trim_to_byte_budget(candidates);
+        assert!(
+            !trimmed.is_empty() && trimmed.len() < 500,
+            "must actually trim"
+        );
+        let bytes = serde_json::to_string(&trimmed).unwrap().len();
+        assert!(
+            bytes <= PAGE_BYTE_BUDGET,
+            "trimmed output must fit the budget: {bytes}"
+        );
+        // One more row must NOT have fit (proves the boundary is exact, not
+        // just "somewhere safely under").
+        assert!(
+            bytes + 1 + row_len > PAGE_BYTE_BUDGET,
+            "the trim boundary must be exact — one more row should have overflowed the budget"
+        );
+    }
+
+    #[test]
+    fn trim_to_byte_budget_always_keeps_at_least_one_row() {
+        // A single row far larger than the whole budget must still come back —
+        // forward-progress guarantee (see `trim_to_byte_budget`'s own doc).
+        let huge_row = json!({ "s": "a".repeat(PAGE_BYTE_BUDGET * 2) });
+        let trimmed = trim_to_byte_budget(vec![huge_row.clone(), huge_row]);
+        assert_eq!(trimmed.len(), 1, "must keep exactly one row, never zero");
     }
 }

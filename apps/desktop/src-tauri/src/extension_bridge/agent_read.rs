@@ -162,7 +162,7 @@ const AGENT_BEST_MATCHES_REFILL_SECS: f64 = 30.0;
 /// a generic shared one) — that struct's own doc reserves exactly this
 /// scenario ("a future compute-heavy verb") for its own instance, since
 /// per-verb cost profiles differ; `best-matches` alone does real CPU work
-/// while the other four resources are cheap in-memory reads, so this struct
+/// while the other five resources are cheap in-memory reads, so this struct
 /// carries TWO independently-sized buckets rather than one shared bucket.
 pub(super) struct AgentQueryThrottle {
     cheap: TokenBucket,
