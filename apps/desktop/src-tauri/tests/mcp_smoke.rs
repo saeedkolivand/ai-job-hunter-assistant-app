@@ -60,6 +60,7 @@ const READ_TIER_TOOLS: &[&str] = &[
     "job",
     "profile",
     "automations",
+    "found-jobs",
     "commands",
     "call-read",
 ];

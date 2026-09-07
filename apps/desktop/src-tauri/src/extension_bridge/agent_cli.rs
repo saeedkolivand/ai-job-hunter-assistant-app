@@ -172,6 +172,20 @@ enum Verb {
     Profile,
     Automations,
     Schema,
+    /// Paginated traversal of one autopilot's `found_jobs` (issue #1115) —
+    /// `autopilot_get`/`autopilot_list`/`autopilot_best_matches` cannot
+    /// enumerate this: the first two are unbounded (every real autopilot
+    /// exceeds the MCP bridge's own result cap) and the third is a
+    /// cross-autopilot top-N ranking, not a per-autopilot full traversal.
+    /// `cursor` is a plain decimal offset into the stored `found_jobs`
+    /// order (see `agent_read::resolve_found_jobs`'s doc for why an offset
+    /// is sufficient — that order is stable outside a `record_run`/dedup
+    /// split).
+    FoundJobs {
+        autopilot_id: String,
+        limit: Option<u64>,
+        cursor: Option<String>,
+    },
     /// ADR-038 §2's generic dispatch tier (`agent call <namespace>:<command>
     /// [--input '<json>'] [--confirm '<value>']`) — a SEPARATE wire frame
     /// (`agent.call`, never `agent.query`) and reply shape (`dispatched`,
@@ -196,6 +210,7 @@ impl Verb {
             Verb::Profile => "profile",
             Verb::Automations => "automations",
             Verb::Schema => "schema",
+            Verb::FoundJobs { .. } => "found-jobs",
             Verb::Call { .. } => "call",
         }
     }
@@ -231,6 +246,21 @@ impl Verb {
             Verb::Job { url } => json!({ "resource": self.resource_name(), "url": url }),
             Verb::Profile | Verb::Automations | Verb::Schema => {
                 json!({ "resource": self.resource_name() })
+            }
+            Verb::FoundJobs {
+                autopilot_id,
+                limit,
+                cursor,
+            } => {
+                let mut p =
+                    json!({ "resource": self.resource_name(), "autopilotId": autopilot_id });
+                if let Some(limit) = limit {
+                    p["limit"] = json!(limit);
+                }
+                if let Some(cursor) = cursor {
+                    p["cursor"] = json!(cursor);
+                }
+                p
             }
             Verb::Call {
                 namespace,
@@ -288,6 +318,13 @@ const VERB_TABLE: &[VerbHelp] = &[
         returns: "this resource list, as machine-readable JSON",
     },
     VerbHelp {
+        name: "found-jobs",
+        args: "<autopilotId> [--limit <n>] [--cursor <c>]",
+        returns: "one page of an autopilot's complete found-jobs list (default/max limit and the \
+                  cursor format are documented on `agent_read::resolve_found_jobs`); repeat with \
+                  the returned cursor until it comes back null to traverse the whole list",
+    },
+    VerbHelp {
         name: "call",
         args: "<namespace>:<command> [--input '<json>'] [--confirm '<value>']",
         returns: "ADR-038 §2's generic dispatch tier — Read/Reversible commands dispatch \
@@ -328,6 +365,7 @@ fn parse_verb(args: &[String]) -> AppResult<Verb> {
         Some("profile") => Ok(Verb::Profile),
         Some("automations") => Ok(Verb::Automations),
         Some("schema") => Ok(Verb::Schema),
+        Some("found-jobs") => parse_found_jobs(&args[1..]),
         Some("call") => parse_call(&args[1..]),
         // Never echoes the typed token (LOW fix — security review): argv can
         // carry a path/username, and this reply lands in an agent transcript
@@ -370,6 +408,56 @@ fn parse_best_matches(rest: &[String]) -> AppResult<Verb> {
         }
     }
     Ok(Verb::BestMatches { limit })
+}
+
+/// Parse `found-jobs`' own args: `<autopilotId> [--limit <n>] [--cursor <c>]`.
+/// Mirrors [`parse_best_matches`]'s flag-parsing loop, plus the one
+/// positional argument every other multi-arg verb here (`job`) also takes
+/// first. Never echoes an unknown flag's raw token (same reasoning as
+/// [`parse_best_matches`]'s own comment).
+fn parse_found_jobs(rest: &[String]) -> AppResult<Verb> {
+    let autopilot_id = rest
+        .first()
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation("found-jobs requires an <autopilotId> argument".to_string())
+        })?
+        .to_string();
+
+    let mut limit = None;
+    let mut cursor = None;
+    let mut i = 1;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--limit" => {
+                let raw = rest
+                    .get(i + 1)
+                    .ok_or_else(|| AppError::Validation("--limit requires a value".to_string()))?;
+                limit = Some(raw.parse::<u64>().map_err(|_| {
+                    AppError::Validation("--limit must be a non-negative integer".to_string())
+                })?);
+                i += 2;
+            }
+            "--cursor" => {
+                let raw = rest
+                    .get(i + 1)
+                    .ok_or_else(|| AppError::Validation("--cursor requires a value".to_string()))?;
+                cursor = Some(raw.to_string());
+                i += 2;
+            }
+            _ => {
+                return Err(AppError::Validation(
+                    "unknown argument (expected: --limit, --cursor)".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(Verb::FoundJobs {
+        autopilot_id,
+        limit,
+        cursor,
+    })
 }
 
 /// Parse `call`'s own args: `<namespace>:<command> [--input '<json>']

@@ -660,6 +660,32 @@ pub async fn autopilot_run(app: AppHandle, autopilot_id: String) -> Value {
         &extra_agency,
     );
 
+    // LinkedIn-only post-discovery description enrichment (issue #1114):
+    // LinkedIn search results never carry a description (see
+    // `linkedin::api_client`'s known gap, also documented on `no_jd_text`
+    // above), so `build_found_job` above scored these title-only. Re-read the
+    // just-persisted record (record_run consumed `found_jobs`, and the merge
+    // it performs is what decides the FINAL per-job board/description this
+    // run actually kept) and hand any LinkedIn rows still blank to a
+    // best-effort background pass. Spawned via `tauri::async_runtime::spawn`
+    // (fire-and-forget, never awaited here) right after `record_run` — a
+    // slow/failing LinkedIn fetch can never delay this command's own return
+    // or the "new jobs" notification below, regardless of which one the
+    // detached task happens to still be running alongside — see
+    // `linkedin_enrich`'s own doc for the failure-isolation and rate-limiting
+    // details.
+    if let Some(ap) = store(&app).lock().get(&autopilot_id) {
+        let targets = crate::autopilot_helpers::linkedin_enrich::select_linkedin_enrichment_targets(
+            &ap.found_jobs,
+        );
+        if !targets.is_empty() {
+            let app_for_enrich = app.clone();
+            tauri::async_runtime::spawn(async move {
+                linkedin_enrich::enrich_linkedin_descriptions(app_for_enrich, targets).await;
+            });
+        }
+    }
+
     // Surface genuinely-new finds while the user is away: a permission-gated
     // notification + a "New jobs: N" tray counter that jumps back to this run.
     // `notes_generated` (≤ new_count, since only new matches are annotated) lets
@@ -936,6 +962,14 @@ use rerank::*;
 // recomputed here rather than persisted.
 mod best_matches;
 use best_matches::*;
+
+// ── LinkedIn-only post-discovery description enrichment (issue #1114) ──────
+//
+// L3 (Tauri/`AppHandle`-touching orchestration) — the pure "which URLs need a
+// fetch" / "what does a fetch outcome mean" decisions live in the L2
+// `autopilot_helpers::linkedin_enrich` instead (see its doc + this module's
+// own doc for the boundary and why: `docs/architecture-rules.md` R2/R7).
+mod linkedin_enrich;
 
 /// Whether a posting passes the autopilot's keyword filters: it must contain
 /// **all** must-include keywords and **none** of the exclude keywords, matched

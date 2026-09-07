@@ -14,6 +14,8 @@ use crate::pipeline::Completer;
 use crate::prompt_fence::{fenced, JOB_CAP, RESUME_CAP};
 use crate::scraping::{BoardScrapeSummary, BoardSearchInput, JobPosting, ScraperEngine};
 
+pub(crate) mod linkedin_enrich;
+
 /// Scrape job postings from one or more boards for an autopilot run. Returns the
 /// postings **and** the per-board diagnostics, so the run can explain a zero
 /// result (e.g. an aggregator error or a skipped board) instead of silently

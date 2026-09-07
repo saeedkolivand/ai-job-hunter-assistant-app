@@ -54,6 +54,48 @@ fn rejects_job_without_a_url() {
 }
 
 #[test]
+fn parses_found_jobs_with_just_an_autopilot_id() {
+    assert_eq!(
+        parse_verb(&s(&["found-jobs", "ap-1"])).unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: None,
+            cursor: None,
+        }
+    );
+}
+
+#[test]
+fn parses_found_jobs_with_limit_and_cursor() {
+    assert_eq!(
+        parse_verb(&s(&[
+            "found-jobs",
+            "ap-1",
+            "--limit",
+            "50",
+            "--cursor",
+            "100"
+        ]))
+        .unwrap(),
+        Verb::FoundJobs {
+            autopilot_id: "ap-1".to_string(),
+            limit: Some(50),
+            cursor: Some("100".to_string()),
+        }
+    );
+}
+
+#[test]
+fn rejects_found_jobs_without_an_autopilot_id() {
+    assert!(parse_verb(&s(&["found-jobs"])).is_err());
+}
+
+#[test]
+fn rejects_found_jobs_non_numeric_limit() {
+    assert!(parse_verb(&s(&["found-jobs", "ap-1", "--limit", "abc"])).is_err());
+}
+
+#[test]
 fn parses_the_three_no_arg_verbs() {
     assert_eq!(parse_verb(&s(&["profile"])).unwrap(), Verb::Profile);
     assert_eq!(parse_verb(&s(&["automations"])).unwrap(), Verb::Automations);
@@ -362,6 +404,7 @@ fn verb_table_names_match_a_hand_written_literal_list() {
             "automations",
             "best-matches",
             "call",
+            "found-jobs",
             "job",
             "profile",
             "schema"
@@ -376,6 +419,7 @@ fn every_verb_in_the_table_is_parseable_with_its_minimal_args() {
     for v in VERB_TABLE {
         let args: Vec<String> = match v.name {
             "job" => s(&["job", "https://example.com/1"]),
+            "found-jobs" => s(&["found-jobs", "ap-1"]),
             "call" => s(&["call", "jobs:jobs_list"]),
             other => s(&[other]),
         };
